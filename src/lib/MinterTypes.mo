@@ -47,7 +47,7 @@ module {
     fee: { gasPrice: Wei; maxFee: Wei };
     nonce: ?Nonce;
     toids: [Nat];
-    txHash: ?TxHash;
+    txHash: [TxHash];
     tx: ?Transaction;
     rawTx: ?([Nat8], [Nat8]);
     signedTx: ?([Nat8], [Nat8]);
@@ -109,7 +109,6 @@ module {
   };
   public type Mode = {
     #ReadOnly;
-    // #RestrictedTo : [Principal];
     #GeneralAvailability;
   };
   public type InitArgs = {
@@ -120,76 +119,4 @@ module {
     mode : Mode;
   };
 
-  
-  // public type RetrieveBtcArgs = { address : Text; amount : Nat64 };
-  // public type RetrieveBtcError = {
-  //   #MalformedAddress : Text;
-  //   #GenericError : { error_message : Text; error_code : Nat64 };
-  //   #TemporarilyUnavailable : Text;
-  //   #AlreadyProcessing;
-  //   #AmountTooLow : Nat64;
-  //   #InsufficientFunds : { balance : Nat64 };
-  // };
-  // public type RetrieveBtcOk = { block_index : Nat64 };
-  // // public type RetrieveBtcStatus = {
-  // //   #Signing;
-  // //   #Confirmed : { txid : [Nat8] };
-  // //   #Sending : { txid : [Nat8] };
-  // //   #AmountTooLow;
-  // //   #Unknown;
-  // //   #Submitted : { txid : [Nat8] };
-  // //   #Pending;
-  // // };
-  // public type UpdateBalanceError = {
-  //   #GenericError : { error_message : Text; error_code : Nat64 };
-  //   #TemporarilyUnavailable : Text;
-  //   #AlreadyProcessing;
-  //   #NoNewUtxos;
-  // };
-  // public type UpdateBalanceResult = { block_index : Nat64; amount : Nat64 };
-  // public type ICUtxo = ICBTC.Utxo; // Minter.Utxo?
-  // public type Utxo = {
-  //   height : Nat32;
-  //   value : Nat64; // Satoshi
-  //   outpoint : { txid : [Nat8]; vout : Nat32 }; // txid: Blob
-  // };
-  // // public type PubKey = [Nat8];
-  // // public type DerivationPath = [Blob];
-  // public type VaultUtxo = (Address, PubKey, DerivationPath, ICUtxo);
-  // public type RetrieveStatus = {
-  //   account: Account;
-  //   retrieveAccount: Account;
-  //   burnedBlockIndex: Nat;
-  //   btcAddress: Address;
-  //   amount: Nat64; // Satoshi
-  //   txIndex: Nat;
-  // };
-  // public type SendingBtcStatus = {
-  //   destinations: [(Nat64, Address, Nat64)];
-  //   totalAmount: Nat64;
-  //   utxos: [VaultUtxo];
-  //   scriptSigs: [Script.Script];
-  //   fee: Nat64;
-  //   toids: [Nat];
-  //   signedTx: ?[Nat8];
-  //   status: RetrieveBtcStatus;
-  // };
-  // public type Self = actor {
-  //   get_btc_address : shared { subaccount : ?[Nat8] } -> async Text;
-  //   get_events : shared query { start : Nat64; length : Nat64 } -> async [
-  //       Event
-  //     ];
-  //   get_withdrawal_account : shared () -> async Account;
-  //   retrieve_btc : shared RetrieveBtcArgs -> async {
-  //       #Ok : RetrieveBtcOk;
-  //       #Err : RetrieveBtcError;
-  //     };
-  //   retrieve_btc_status : shared query {
-  //       block_index : Nat64;
-  //     } -> async RetrieveBtcStatus;
-  //   update_balance : shared { subaccount : ?[Nat8] } -> async {
-  //       #Ok : UpdateBalanceResult;
-  //       #Err : UpdateBalanceError;
-  //     };
-  // }
 }

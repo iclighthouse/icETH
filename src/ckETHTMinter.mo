@@ -27,6 +27,7 @@ import Order "mo:base/Order";
 import Cycles "mo:base/ExperimentalCycles";
 import ICRC1 "./lib/icl/ICRC1";
 import Binary "./lib/icl/Binary";
+import Hex "./lib/icl/Hex";
 import Tools "./lib/icl/Tools";
 import SagaTM "./ICTC/SagaTM";
 import DRC207 "./lib/icl/DRC207";
@@ -121,6 +122,8 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
     private let utils : ETHUtils.Self = actor(Principal.toText(utils_));
     private stable var ethBlockNumber: (blockheight: BlockHeight, time: Timestamp) = (0, 0); 
     private stable var gasPrice: Wei = 5000000000; // Wei
+    private stable var lastGetGasPriceTime: Timestamp = 0;
+    private var getGasPriceIntervalSeconds: Timestamp = 20 * 60;
     private stable var ethGasLimit: Nat = 21000;  
     private stable var erc20GasLimit: Nat = 66000;
     private stable var lastUpdateFeeTime : Time.Time = 0;
@@ -150,6 +153,33 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
     private stable var chainId : Nat = 1; 
     private stable var rpcUrl: Text = "";
     private stable var lastUpdateTxsTime: Timestamp = 0;
+
+    private func keyb(t: Blob) : Trie.Key<Blob> { return { key = t; hash = Blob.hash(t) }; };
+    private func keyt(t: Text) : Trie.Key<Text> { return { key = t; hash = Text.hash(t) }; };
+    private func keyp(t: Principal) : Trie.Key<Principal> { return { key = t; hash = Principal.hash(t) }; };
+    private func keyn(t: Nat) : Trie.Key<Nat> { return { key = t; hash = Tools.natHash(t) }; };
+    private func trieItems<K, V>(_trie: Trie.Trie<K,V>, _page: ListPage, _size: ListSize) : TrieList<K, V> {
+        let length = Trie.size(_trie);
+        if (_page < 1 or _size < 1){
+            return {data = []; totalPage = 0; total = length; };
+        };
+        let offset = Nat.sub(_page, 1) * _size;
+        var totalPage: Nat = length / _size;
+        if (totalPage * _size < length) { totalPage += 1; };
+        if (offset >= length){
+            return {data = []; totalPage = totalPage; total = length; };
+        };
+        let end: Nat = offset + Nat.sub(_size, 1);
+        var i: Nat = 0;
+        var res: [(K, V)] = [];
+        for ((k,v) in Trie.iter<K, V>(_trie)){
+            if (i >= offset and i <= end){
+                res := Tools.arrayAppend(res, [(k,v)]);
+            };
+            i += 1;
+        };
+        return {data = res; totalPage = totalPage; total = length; };
+    };
 
     private func _getEvent(_blockIndex: BlockHeight) : ?Event{
         switch(Trie.get(blockEvents, keyn(_blockIndex), Nat.equal)){
@@ -189,32 +219,6 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
     };
     private func _checkAsyncMessageLimit() : Bool{
         return _asyncMessageSize() < 400; /*config*/
-    };
-    private func keyb(t: Blob) : Trie.Key<Blob> { return { key = t; hash = Blob.hash(t) }; };
-    private func keyt(t: Text) : Trie.Key<Text> { return { key = t; hash = Text.hash(t) }; };
-    private func keyp(t: Principal) : Trie.Key<Principal> { return { key = t; hash = Principal.hash(t) }; };
-    private func keyn(t: Nat) : Trie.Key<Nat> { return { key = t; hash = Tools.natHash(t) }; };
-    private func trieItems<K, V>(_trie: Trie.Trie<K,V>, _page: ListPage, _size: ListSize) : TrieList<K, V> {
-        let length = Trie.size(_trie);
-        if (_page < 1 or _size < 1){
-            return {data = []; totalPage = 0; total = length; };
-        };
-        let offset = Nat.sub(_page, 1) * _size;
-        var totalPage: Nat = length / _size;
-        if (totalPage * _size < length) { totalPage += 1; };
-        if (offset >= length){
-            return {data = []; totalPage = totalPage; total = length; };
-        };
-        let end: Nat = offset + Nat.sub(_size, 1);
-        var i: Nat = 0;
-        var res: [(K, V)] = [];
-        for ((k,v) in Trie.iter<K, V>(_trie)){
-            if (i >= offset and i <= end){
-                res := Tools.arrayAppend(res, [(k,v)]);
-            };
-            i += 1;
-        };
-        return {data = res; totalPage = totalPage; total = length; };
     };
     
     private func _toSaBlob(_sa: ?Sa) : ?Blob{
@@ -285,7 +289,7 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
                         let (mainAddress, mainNonce) = _getEthAddressQuery(accountId);
                         nonce := mainNonce;
                     }else{
-                        nonce := await* _fetchAccountNonce(tx.from);
+                        nonce := await* _fetchAccountNonce(tx.from, false);
                     };
                     _setEthAccount(accountId, tx.from, nonce + 1);
                     _updateTx(_txi, {
@@ -315,6 +319,10 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
         switch(Trie.get(transactions, keyn(_txi), Nat.equal)){
             case(?(tx, ts)){
                 if (tx.status == #Building){
+                    var chainId_ = chainId;
+                    if (testMainnet){
+                        chainId_ := 1;
+                    };
                     let accountId = _accountId(tx.account.owner, tx.account.subaccount);
                     let isERC20 = tx.tokenId != ethToken;
                     let txObj: Transaction = #EIP1559({
@@ -324,7 +332,7 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
                         data = [];
                         sign = null;
                         max_fee_per_gas = ABI.fromNat(tx.fee.gasPrice);
-                        chain_id = Nat64.fromNat(chainId);
+                        chain_id = Nat64.fromNat(chainId_);
                         nonce = ABI.fromNat(Option.get(tx.nonce, 0));
                         gas_limit = ABI.fromNat(_getGasLimit(isERC20));
                         access_list = [];
@@ -339,7 +347,7 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
                                     amount = null;
                                     nonce = null;
                                     toids = null;
-                                    txHash = ?ABI.toHex(txHash);
+                                    txHash = null; // ?ABI.toHex(txHash);
                                     tx = ?txObj;
                                     rawTx = ?(rawTx, txHash);
                                     signedTx = null;
@@ -488,6 +496,21 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
                                     return {txi = _txi; result = #ok(txid); rpcId = rpcId};
                                 };
                                 case((rpcId, #err(e))){
+                                    // _updateTx(_txi, {
+                                    //     fee = null;
+                                    //     amount = null;
+                                    //     nonce = null;
+                                    //     toids = null;
+                                    //     txHash = null;
+                                    //     tx = null;
+                                    //     rawTx = null;
+                                    //     signedTx = null;
+                                    //     receipt = null;
+                                    //     rpcId = ?rpcId;
+                                    //     status = null;
+                                    //     ts = null;
+                                    // });
+                                    // throw Error.reject("402: (rpcId="# Nat.toText(rpcId) #")" # e);
                                     _updateTx(_txi, {
                                         fee = null;
                                         amount = null;
@@ -499,10 +522,10 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
                                         signedTx = null;
                                         receipt = null;
                                         rpcId = ?rpcId;
-                                        status = null;
+                                        status = ?#Submitted;
                                         ts = null;
                                     });
-                                    throw Error.reject("402: (rpcId="# Nat.toText(rpcId) #")" # e);
+                                    return {txi = _txi; result = #err(e); rpcId = rpcId};
                                 };
                             };
                         };
@@ -789,7 +812,11 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
         };
     };
     private func _getRpcUrl() : Text{
-        return rpcUrl;
+        if (testMainnet){
+            return "https://eth-mainnet.g.alchemy.com/v2/3rh5DTcZ97IcSwS-BthnbCWwjLactENf";
+        }else{
+            return rpcUrl;
+        };
     };
     private func _getBlockNumber() : Nat{
         return ethBlockNumber.0 + (_now() - ethBlockNumber.1) / BLOCK_SLOTS;
@@ -814,7 +841,7 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
                 address := account_;
                 nonce := nonce_;
                 if (_updateNonce){
-                    let nonceNew = await* _fetchAccountNonce(address);
+                    let nonceNew = await* _fetchAccountNonce(address, false);
                     _setEthAccount(_a, address, nonceNew);
                     nonce := nonceNew;
                 };
@@ -822,7 +849,7 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
             case(_){
                 let account = await* _fetchAccountAddress([_a]);
                 if (account.1.size() > 0){
-                    let nonceNew = await* _fetchAccountNonce(account.2);
+                    let nonceNew = await* _fetchAccountNonce(account.2, false);
                     _setEthAccount(_a, account.2, nonceNew);
                     address := account.2;
                     nonce := nonceNew;
@@ -950,6 +977,10 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
         var maxFee: Wei = erc20GasLimit * (gasPrice + PRIORITY_FEE_PER_GAS);
         if (not _isERC20){
             maxFee := ethGasLimit * (gasPrice + PRIORITY_FEE_PER_GAS);
+            if (testMainnet){
+                maxFee := ethGasLimit * (55000000000 + PRIORITY_FEE_PER_GAS);
+                return { gasPrice = 55000000000 + PRIORITY_FEE_PER_GAS; maxFee = maxFee };
+            };
         };
         return { gasPrice = gasPrice + PRIORITY_FEE_PER_GAS; maxFee = maxFee };
     };
@@ -980,7 +1011,7 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
             fee = fee;
             nonce = null;
             toids = [];
-            txHash = null;
+            txHash = [];
             tx = null;
             rawTx = null;
             signedTx = null;
@@ -1018,7 +1049,7 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
                     fee = Option.get(_update.fee, tx.fee);
                     nonce = switch(_update.nonce){case(?(nonce)){ ?nonce }; case(_){ tx.nonce } };
                     toids = Tools.arrayAppend(tx.toids, Option.get(_update.toids, []));
-                    txHash = switch(_update.txHash){case(?(txHash)){ ?txHash }; case(_){ tx.txHash } };
+                    txHash = switch(_update.txHash){case(?(txHash)){ Tools.arrayAppend(tx.txHash, [txHash]) }; case(_){ tx.txHash } };
                     tx = switch(_update.tx){case(?(tx)){ ?tx }; case(_){ tx.tx } };
                     rawTx = switch(_update.rawTx){case(?(rawTx)){ ?rawTx }; case(_){ tx.rawTx } };
                     signedTx = switch(_update.signedTx){case(?(signedTx)){ ?signedTx }; case(_){ tx.signedTx } };
@@ -1040,6 +1071,9 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
                 if (tx.status != #Failure and tx.status != #Confirmed){
                     let accountId = _accountId(tx.account.owner, tx.account.subaccount);
                     let isERC20 = tx.tokenId != ethToken;
+                    if (_now() > lastGetGasPriceTime + getGasPriceIntervalSeconds){
+                        let _gasPrice = await* _fetchGasPrice();
+                    };
                     let feeNew = _getEthFee(isERC20); 
                     var amountNew = Nat.sub(tx.amount, _amountSub);
                     if (feeNew.maxFee > tx.fee.maxFee){
@@ -1172,6 +1206,7 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
                         case(?(value)){ // wei
                             _postRpcLog(id, ?r, null);
                             gasPrice := value * 11 / 10; // * debug
+                            lastGetGasPriceTime := _now();
                             return gasPrice;
                         }; 
                         case(_){
@@ -1245,9 +1280,13 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
         };
         return (own_public_key, own_account, own_address);
     };
-    private func _fetchAccountNonce(_address: EthAddress) : async* Nonce{
+    private func _fetchAccountNonce(_address: EthAddress, _isLatest: Bool) : async* Nonce{
         let id = rpcId;
-        let input = "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getTransactionCount\",\"params\": [\""# _address #"\", \"pending\"],\"id\":"# Nat.toText(rpcId) #"}";
+        var block = "pending";
+        if (_isLatest){
+            block := "latest";
+        };
+        let input = "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getTransactionCount\",\"params\": [\""# _address #"\", \""# block #"\"],\"id\":"# Nat.toText(rpcId) #"}";
         rpcId += 1;
         _preRpcLog(id, input);
         Cycles.add(ECDSA_RPC_CYCLES);
@@ -1304,7 +1343,7 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
         rpcId += 1;
         _preRpcLog(id, input);
         Cycles.add(ECDSA_RPC_CYCLES);
-        let res = await rpc.json_rpc(input, 2000, #url_with_api_key(_getRpcUrl()));
+        let res = await rpc.json_rpc(input, 1000, #url_with_api_key(_getRpcUrl()));
         switch(res){
             case(#Ok(r)){
                 switch(_getBytesFromJson(r, "result")){
@@ -1388,49 +1427,55 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
         switch(Trie.get(transactions, keyn(_txIndex), Nat.equal)){
             case(?(tx, ts)){
                 if ((tx.status == #Sending or tx.status == #Submitted or tx.status == #Pending) and (_immediately or _now() > ts + 120)){
-                    switch(tx.txHash){
-                        case(?(txHash)){
-                            let (succeeded, blockHeight, txStatus, res) = await* _fetchTxReceipt(txHash);
-                            var status = tx.status;
-                            if (succeeded and blockHeight > 0 and _getBlockNumber() >= blockHeight + MIN_CONFIRMATIONS){
-                                status := #Confirmed;
-                                if (tx.txType == #Deposit){
-                                    ignore _addBalance(_accountId(tx.account.owner, tx.account.subaccount), tx.tokenId, tx.amount);
-                                    ignore _removeDepositingTxIndex(_accountId(tx.account.owner, tx.account.subaccount), _txIndex);
-                                }else if(tx.txType == #Withdraw){
-                                    _removeRetrievingTxIndex(_txIndex);
-                                };
-                            }else if (succeeded and (blockHeight == 0 or _getBlockNumber() < blockHeight + MIN_CONFIRMATIONS)){
-                                status := #Pending;
-                            }else if (not(succeeded) and blockHeight > 0 and _getBlockNumber() >= blockHeight + MIN_CONFIRMATIONS){
-                                status := #Failure;
-                                if (tx.txType == #Deposit){
-                                    ignore _removeDepositingTxIndex(_accountId(tx.account.owner, tx.account.subaccount), _txIndex);
-                                }else if(tx.txType == #Withdraw){
-                                    _removeRetrievingTxIndex(_txIndex);
-                                };
+                    let txHashs = tx.txHash;
+                    var status = tx.status;
+                    var countFailure : Nat = 0;
+                    var receiptTemp: ?Text = null;
+                    label TxReceipt for (txHash in txHashs.vals()){
+                        let (succeeded, blockHeight, txStatus, res) = await* _fetchTxReceipt(txHash);
+                        if (succeeded and blockHeight > 0 and _getBlockNumber() >= blockHeight + MIN_CONFIRMATIONS){
+                            status := #Confirmed;
+                            receiptTemp := res;
+                            if (tx.txType == #Deposit){
+                                ignore _addBalance(_accountId(tx.account.owner, tx.account.subaccount), tx.tokenId, tx.amount);
+                                ignore _removeDepositingTxIndex(_accountId(tx.account.owner, tx.account.subaccount), _txIndex);
+                            }else if(tx.txType == #Withdraw){
+                                _removeRetrievingTxIndex(_txIndex);
                             };
-                            let tsNew = if (_immediately) { ts } else{ _now() };
-                            if (status != tx.status){
-                                _updateTx(_txIndex, {
-                                    fee = null;
-                                    amount = null;
-                                    nonce = null;
-                                    toids = null;
-                                    txHash = null;
-                                    tx = null;
-                                    rawTx = null;
-                                    signedTx = null;
-                                    receipt = res;
-                                    rpcId = null;
-                                    status = ?status;
-                                    ts = ?tsNew;
-                                });
-                            }else{
-                                transactions := Trie.put(transactions, keyn(_txIndex), Nat.equal, (tx, tsNew)).0;
-                            };
+                            break TxReceipt;
+                        }else if (succeeded and (blockHeight == 0 or _getBlockNumber() < blockHeight + MIN_CONFIRMATIONS)){
+                            status := #Pending;
+                            receiptTemp := res;
+                        }else if (not(succeeded) and blockHeight > 0 and _getBlockNumber() >= blockHeight + MIN_CONFIRMATIONS){
+                            countFailure += 1;
                         };
-                        case(_){};
+                    };
+                    if (countFailure == txHashs.size()){
+                        status := #Failure;
+                        if (tx.txType == #Deposit){
+                            ignore _removeDepositingTxIndex(_accountId(tx.account.owner, tx.account.subaccount), _txIndex);
+                        }else if(tx.txType == #Withdraw){
+                            _removeRetrievingTxIndex(_txIndex);
+                        };
+                    };
+                    let tsNew = if (_immediately) { ts } else{ _now() };
+                    if (status != tx.status){
+                        _updateTx(_txIndex, {
+                            fee = null;
+                            amount = null;
+                            nonce = null;
+                            toids = null;
+                            txHash = null;
+                            tx = null;
+                            rawTx = null;
+                            signedTx = null;
+                            receipt = receiptTemp;
+                            rpcId = null;
+                            status = ?status;
+                            ts = ?tsNew;
+                        });
+                    }else{
+                        transactions := Trie.put(transactions, keyn(_txIndex), Nat.equal, (tx, tsNew)).0;
                     };
                 };
             };
@@ -1474,8 +1519,11 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
         };
         let isERC20 = Option.isSome(_token);
         let tokenId = Option.get(_token, ethToken);
+        if (_now() > lastGetGasPriceTime + getGasPriceIntervalSeconds){
+            let _gasPrice = await* _fetchGasPrice();
+        };
         let ethFee = _getEthFee(isERC20); // eth Wei
-        let tokenFee = ethFee.maxFee; // token Wei  *  debug 
+        let tokenFee = ethFee.maxFee; // token Wei  * debug 
         var depositAmount: Wei = 0;
         if (Option.isSome(_getDepositingTxIndex(accountId))){
             await* _syncTxStatus(Option.get(_getDepositingTxIndex(accountId),0), false);
@@ -1507,6 +1555,9 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
             let task3 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#signTx(txi)), [], 0);
             let comp3 = _buildTask(?txiBlob, Principal.fromActor(this), #__skip, [], 0);
             let ttid3 = saga.push(toid, task3, ?comp3, null);
+            let task4 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#sendTx(txi)), [], 0);
+            let comp4 = _buildTask(?txiBlob, Principal.fromActor(this), #__skip, [], 0);
+            let ttid4 = saga.push(toid, task4, ?comp4, null);
             saga.close(toid);
             await* _ictcSagaRun(toid, false);
             lastExecutionDuration := Time.now() - __start;
@@ -1575,7 +1626,7 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
             if (lastExecutionDuration > maxExecutionDuration) { maxExecutionDuration := lastExecutionDuration };
             return #Ok({ blockIndex = Nat.sub(blockIndex, 1);  amount = amount; toid= toid });
         }else{
-            return #Err(#GenericError({code = 403; message="403: Insufficient amount."}));
+            return #Err(#GenericError({code = 403; message="403: Insufficient deposit or deposit transaction not yet confirmed."}));
         };
     };
     public shared(msg) func get_withdrawal_account(_account : { owner: Principal; subaccount : ?[Nat8] }) : async Minter.Account{
@@ -1612,9 +1663,12 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
         };
         let isERC20 = Option.isSome(_token);
         let tokenId = Option.get(_token, ethToken);
-        // let icrc1Fee = ckethFee_; // *  debug // Wei
+        // let icrc1Fee = ckethFee_; // * debug // Wei
+        if (_now() > lastGetGasPriceTime + getGasPriceIntervalSeconds){
+            let _gasPrice = await* _fetchGasPrice();
+        };
         let ethFee = _getEthFee(isERC20); // eth Wei
-        let tokenFee = ethFee.maxFee; // token Wei  *  debug 
+        let tokenFee = ethFee.maxFee; // token Wei  * debug 
         //AmountTooLow
         if (_amount < ETH_MIN_AMOUNT){
             return #Err(#GenericError({code = 402; message="402: Amount is too low."}));
@@ -1667,6 +1721,8 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
                 let ttid2 = saga.push(toid, task2, null, null);
                 let task3 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#signTx(txi)), [], 0);
                 let ttid3 = saga.push(toid, task3, null, null);
+                let task4 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#sendTx(txi)), [], 0);
+                let ttid4 = saga.push(toid, task4, null, null);
                 saga.close(toid);
                 await* _ictcSagaRun(toid, false);
                 lastExecutionDuration := Time.now() - __start;
@@ -1851,6 +1907,40 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
         assert(_onlyOwner(msg.caller));
         return await utils.parse_transaction(Blob.toArray(_data));
     };
+    private var testMainnet: Bool = false;
+    public shared(msg) func debug_send_to(_principal: Principal, _from: EthAddress, _to: EthAddress, _amount: Wei): async TxIndex{
+        assert(_onlyOwner(msg.caller));
+        testMainnet := true;
+        let accountId = _accountId(_principal, null);
+        let txi = _newTx(#Deposit, {owner = _principal; subaccount = null }, ethToken, _from, _to, _amount);
+        //ICTC:
+        let saga = _getSaga();
+        let txiBlob = Blob.fromArray(Binary.BigEndian.fromNat64(Nat64.fromNat(txi))); 
+        let toid : Nat = saga.create("deposit--", #Backward, ?accountId, null);
+        let task1 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#getNonce(txi, ?[toid])), [], 0);
+        let comp1 = _buildTask(?txiBlob, Principal.fromActor(this), #__skip, [], 0);
+        let ttid1 = saga.push(toid, task1, ?comp1, null);
+        let task2 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#createTx(txi)), [], 0);
+        let comp2 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#createTx_comp(txi)), [], 0);
+        let ttid2 = saga.push(toid, task2, ?comp2, null);
+        let task3 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#signTx(txi)), [], 0);
+        let comp3 = _buildTask(?txiBlob, Principal.fromActor(this), #__skip, [], 0);
+        let ttid3 = saga.push(toid, task3, ?comp3, null);
+        let task4 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#sendTx(txi)), [], 0);
+        let comp4 = _buildTask(?txiBlob, Principal.fromActor(this), #__skip, [], 0);
+        let ttid4 = saga.push(toid, task4, ?comp4, null);
+        saga.close(toid);
+        await* _ictcSagaRun(toid, false);
+        testMainnet := false;
+        return txi;
+    };
+    public shared(msg) func debug_cover_tx(_txi: TxIndex) : async ?BlockHeight{
+        assert(_onlyOwner(msg.caller));
+        testMainnet := true;
+        let res = await* _coverTx(_txi, false, null, 0);
+        testMainnet := false;
+        return res;
+    };
 
     /* ===========================
       Management section
@@ -1874,16 +1964,16 @@ shared(installMsg) actor class icETHMinter(initArgs: Minter.InitArgs) = this {
         chainId := await* _fetchChainId();
         return true;
     };
-    public shared(msg) func rebuildTx(_txi: TxIndex, _refetchGasPrice: ?Bool, _amountSub: Wei) : async ?BlockHeight{
+    public shared(msg) func rebuildTx(_txi: TxIndex, _resetNonce: Bool, _refetchGasPrice: Bool, _amountSub: Wei) : async ?BlockHeight{
         assert(_onlyOwner(msg.caller));
         await* _syncTxStatus(_txi, true);
-        return await* _coverTx(_txi, true, _refetchGasPrice, _amountSub);
+        return await* _coverTx(_txi, _resetNonce, ?_refetchGasPrice, _amountSub);
     };
-    public shared(msg) func resetNonce() : async Nonce{
+    public shared(msg) func resetNonce(_isLatest: Bool) : async Nonce{
         assert(_onlyOwner(msg.caller));
         let mainAccountId = _accountId(Principal.fromActor(this), null);
         let (mainAddress, mainNonce) = _getEthAddressQuery(mainAccountId);
-        let nonce = await* _fetchAccountNonce(mainAddress);
+        let nonce = await* _fetchAccountNonce(mainAddress, _isLatest);
         _setEthAccount(mainAccountId, mainAddress, nonce);
         return nonce;
     };
