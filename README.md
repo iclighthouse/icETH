@@ -1,20 +1,12 @@
 # ckETH
 
-ckETH and ckERC20 are important parts of the Ethereum integration and are currently the use cases for implementing the Phase-1.
+Ethereum integration (ckETH and ckERC20) for motoko implementation
 
 ## About Ethereum Integration
 
 A true World Computer enables a multi-chain environment where centralized bridges are obsolete and smart contracts can seamlessly communicate across blockchains. ICP already integrates with the Bitcoin Network, and native ETH integration is underway.
 
 https://internetcomputer.org/ethereum-integration
-
-The program is divided into two phases.
-
-- Phase 1: Calling the RPC interface of Ethereum via HTTPS Outcalls.
-
-- Phase 2: Implement the on-chain Ethereum API.
-
-ICLighthouse, as one of the ethereum integration contributors, is working with the Dfinity Foundation to implement the ckETH and ckERC20 parts of Phase 1.
 
 ## Introduction
 
@@ -33,8 +25,8 @@ ckETH/ckERC20 is an ICRC1 standard token running on the IC network, a token crea
 ## Roadmap
 
 - ckETH Minting and Retrieval (done)
-- ckERC20 Minting and Retrieval (doing)
-- Decentralization with multiple RPC API providers
+- ckERC20 Minting and Retrieval (done)
+- Decentralization with multiple RPC API providers (done)
 
 ## Demo
 
